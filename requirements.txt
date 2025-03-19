@@ -1,0 +1,6 @@
+langchain
+langgraph
+boto3
+python-dotenv
+langchain-community
+langchain-aws
