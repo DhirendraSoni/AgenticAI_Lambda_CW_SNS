@@ -14,19 +14,50 @@ st.title("AWS Lambda Log Processor")
 aws_access_key_id = st.text_input("Enter your AWS Access Key ID", type="password")
 aws_secret_access_key = st.text_input("Enter your AWS Secret Access Key", type="password")
 aws_region = st.text_input("Enter your AWS Region", "us-east-1")
+llm = None
+
+# os.environ["AWS_ACCESS_KEY_ID"]=os.getenv("AWS_ACCESS_KEY_ID")
+# os.environ["AWS_SECRET_ACCESS_KEY"]=os.getenv("AWS_SECRET_ACCESS_KEY")
+# os.environ["AWS_REGION"]=os.getenv("AWS_REGION")
+
+@dataclass
+class WorkflowState:
+    lambda_functions: list
+    logs: dict = None
+    processed_logs: dict = None
+    s3_links: dict = None
+    llm: object = None
+    s3_client: object = None
+    sns_client: object = None
+
+    def __post_init__(self):
+        if self.logs is None:
+            self.logs = {}
+        if self.processed_logs is None:
+            self.processed_logs = {}
+        if self.s3_links is None:
+            self.s3_links = {}  
 
 # Function to create a session using provided API keys
-def create_aws_session():
+# def create_aws_session():
+#     return boto3.Session(
+#         aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
+#         aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
+#         region_name=os.environ["AWS_REGION"]
+#     )
+
+def create_aws_session(aws_access_key_id, aws_secret_access_key, aws_region):
     return boto3.Session(
         aws_access_key_id=aws_access_key_id,
         aws_secret_access_key=aws_secret_access_key,
         region_name=aws_region
     )
 
+
 # AWS Client Initialization
-def init_clients():
+def init_clients(aws_access_key_id, aws_secret_access_key, aws_region):
     try:
-        session = create_aws_session()
+        session = create_aws_session(aws_access_key_id, aws_secret_access_key, aws_region)
 
         sns_client = session.client("sns")
         s3_client = session.client("s3")
@@ -69,21 +100,7 @@ def init_model(bedrock_client):
     except Exception as e:
         st.error(f"Error initializing the model: {e}")
         return None
-
-@dataclass
-class WorkflowState:
-    lambda_functions: list
-    logs: str = ""
-    processed_logs: dict = None
-    s3_links: dict = None
-
-    def __post_init__(self):
-        if self.logs is None:
-            self.logs = {}
-        if self.processed_logs is None:
-            self.processed_logs = {}
-        if self.s3_links is None:
-            self.s3_links = {}
+  
 
 # Step 1: Find Lambda Functions by Prefix
 def find_lambda_functions_by_prefix(prefix="test", lambda_client=None):
@@ -121,9 +138,13 @@ def read_cloudwatch_logs(state, logs_client=None):
     return state
 
 # Step 3: Process Logs with LLM
-def process_logs(state, llm=None):
+st.write("****************")
+st.write(llm)
+
+def process_logs(state):
+    llm = state.llm
     if llm is None:
-        st.error("LLM (model) is not initialized properly!")
+        st.error("LLM (model) is not initialized in state!")
         return state
     
     processed_logs = {}
@@ -143,26 +164,37 @@ def process_logs(state, llm=None):
     return state
 
 # Step 4: Store Logs in S3
-def store_logs_in_s3(state, s3_client=None):
-    bucket_name = "testbucket-cw-logstore"
+def store_logs_in_s3(state):
+    s3_client = state.s3_client
+    if s3_client is None:
+        st.error("S3 client is not initialized!")
+        return state
+
+    bucket_name = "testbucket-cw-logstore"  # replace with your actual bucket
     s3_links = {}
 
     for function_name, processed_log in state.processed_logs.items():
-        file_name = f"processed_logs_{function_name}.json"
-        s3_client.put_object(
-            Bucket=bucket_name, 
-            Key=file_name, 
-            Body=json.dumps({"logs": processed_log})
-        )
-        s3_links[function_name] = f"https://s3.amazonaws.com/{bucket_name}/{file_name}"
-    
+        key = f"logs/{function_name}_log_summary.txt"
+        try:
+            s3_client.put_object(
+                Bucket=bucket_name,
+                Key=key,
+                Body=processed_log.encode("utf-8")
+            )
+            link = f"https://{bucket_name}.s3.amazonaws.com/{key}"
+            s3_links[function_name] = link
+        except Exception as e:
+            st.error(f"Failed to upload logs for {function_name} to S3: {e}")
+            s3_links[function_name] = "Upload failed"
+
     state.s3_links = s3_links
     return state
 
 # Step 5: SNS Notification
-def send_sns_notification(state, sns_client=None):
+def send_sns_notification(state):
+    sns_client = state.sns_client
     if sns_client is None:
-        st.error("SNS client is not initialized.")
+        st.error("SNS client is not initialized!")
         return state
 
     warning_logs = []
@@ -209,10 +241,13 @@ def send_sns_notification(state, sns_client=None):
 # Streamlit UI Logic
 lambda_prefix = st.text_input("Enter Lambda function prefix", "test1")
 
+
 if aws_access_key_id and aws_secret_access_key and aws_region:
-    sns_client, s3_client, logs_client, lambda_client, bedrock_client = init_clients()
+    sns_client, s3_client, logs_client, lambda_client, bedrock_client = init_clients(
+        aws_access_key_id, aws_secret_access_key, aws_region
+    )
     llm = init_model(bedrock_client)
-    
+    st.write(f"find all the lambda functions...{llm}")
     if sns_client and llm:
         if st.button("Find Lambda Functions"):
             lambda_functions = find_lambda_functions_by_prefix(lambda_prefix, lambda_client)
@@ -233,7 +268,15 @@ if aws_access_key_id and aws_secret_access_key and aws_region:
                 compiled_workflow = workflow.compile()
 
                 # Display workflow graph
-                st.image(compiled_workflow.get_graph().draw_mermaid_png())
+                #st.image(compiled_workflow.get_graph().draw_mermaid_png())
+
+                try:
+                    st.image(compiled_workflow.get_graph().draw_mermaid_png())
+                except Exception as e:
+                    st.warning(f"Mermaid rendering failed: {e}")
+                    st.code(compiled_workflow.get_graph().draw_mermaid(), language="mermaid")
+
+
 
                 # Invoke the workflow with found Lambda functions
                 compiled_workflow.invoke(
@@ -241,7 +284,10 @@ if aws_access_key_id and aws_secret_access_key and aws_region:
                         lambda_functions=lambda_functions,
                         logs={},
                         processed_logs={},
-                        s3_links={}
+                        s3_links={},
+                        llm=llm,
+                        s3_client=s3_client,
+                        sns_client=sns_client
                     )
                 )
                 st.success("Workflow complete and SNS notification sent!")
