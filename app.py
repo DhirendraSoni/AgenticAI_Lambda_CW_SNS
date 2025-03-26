@@ -25,6 +25,7 @@ class WorkflowState:
     lambda_functions: list
     logs: dict = None
     processed_logs: dict = None
+    error_counts: dict = None
     s3_links: dict = None
     llm: object = None
     s3_client: object = None
@@ -141,27 +142,136 @@ def read_cloudwatch_logs(state, logs_client=None):
 st.write("****************")
 st.write(llm)
 
+# def process_logs(state):
+#     llm = state.llm
+#     if llm is None:
+#         st.error("LLM (model) is not initialized in state!")
+#         return state
+    
+#     processed_logs = {}
+#     for function_name, logs in state.logs.items():
+#         prompt = f"""Analyze the following CloudWatch logs and categorize errors as Critical, Warning, or Info. 
+#         Provide a summary of the errors found for function {function_name}. Logs:
+#         {logs}"""
+
+#         try:
+#             response = llm.generate([prompt])
+#             processed_logs[function_name] = response.generations[0][0].text  # Extract first response
+#         except Exception as e:
+#             st.error(f"Error during log processing for {function_name}: {e}")
+#             processed_logs[function_name] = "Error processing logs"
+    
+#     state.processed_logs = processed_logs
+#     return state
+
+#Step 3:
+# def process_logs(state):
+#     llm = state.llm
+#     if llm is None:
+#         st.error("LLM (model) is not initialized in state!")
+#         return state
+    
+#     processed_logs = {}
+#     error_counts = {}
+
+#     for function_name, logs in state.logs.items():
+#         prompt = f"""
+#         Analyze the following AWS CloudWatch logs for Lambda function `{function_name}`.
+#         Categorize log lines into Critical, Warning, or Info. Count the number of each category.
+#         Provide a short summary of the main errors.
+
+#         Respond in the following JSON format:
+#         {{
+#             "Critical": <number>,
+#             "Warning": <number>,
+#             "Info": <number>,
+#             "Summary": "<summary text>"
+#         }}
+
+#         Logs:
+#         {logs}
+#         """
+
+#         try:
+#             response = llm.generate([prompt])
+#             output = response.generations[0][0].text.strip()
+
+#             import json
+#             parsed = json.loads(output)
+
+#             processed_logs[function_name] = parsed.get("Summary", "No summary provided")
+#             error_counts[function_name] = {
+#                 "Critical": parsed.get("Critical", 0),
+#                 "Warning": parsed.get("Warning", 0),
+#                 "Info": parsed.get("Info", 0)
+#             }
+
+#         except Exception as e:
+#             st.error(f"Error processing logs for {function_name}: {e}")
+#             processed_logs[function_name] = "Error processing logs"
+#             error_counts[function_name] = {
+#                 "Critical": 0,
+#                 "Warning": 0,
+#                 "Info": 0
+#             }
+
+#     state.processed_logs = processed_logs
+#     state.error_counts = error_counts
+#     return state
+
+import re
+
 def process_logs(state):
     llm = state.llm
     if llm is None:
         st.error("LLM (model) is not initialized in state!")
         return state
-    
+
     processed_logs = {}
+    error_counts = {}
+
     for function_name, logs in state.logs.items():
-        prompt = f"""Analyze the following CloudWatch logs and categorize errors as Critical, Warning, or Info. 
-        Provide a summary of the errors found for function {function_name}. Logs:
-        {logs}"""
+        prompt = f"""
+        You are an expert log analyzer.
+
+        Analyze the following AWS CloudWatch logs for Lambda function: **{function_name}**.
+
+        Tasks:
+        1. Identify log lines that indicate errors.
+        2. Categorize each line as either: CRITICAL, ERROR, WARNING, or INFO.
+        3. Count the number of each category.
+        4. Return a short summary and the counts.
+
+        Logs:
+        {logs}
+                """
 
         try:
             response = llm.generate([prompt])
-            processed_logs[function_name] = response.generations[0][0].text  # Extract first response
+            raw_output = response.generations[0][0].text.strip()
+            if not raw_output:
+                raise ValueError("LLM response was empty")
+
+            # Example fallback parsing - regex based (optional, adjust for your LLM's response format)
+            counts = {
+                "Critical": len(re.findall(r"\bCRITICAL\b", raw_output, re.IGNORECASE)),
+                "Warning": len(re.findall(r"\bWARNING\b", raw_output, re.IGNORECASE)),
+                "Info": len(re.findall(r"\bINFO\b", raw_output, re.IGNORECASE))
+            }
+
+            processed_logs[function_name] = raw_output
+            error_counts[function_name] = counts
+
         except Exception as e:
-            st.error(f"Error during log processing for {function_name}: {e}")
+            st.error(f"Error processing logs for {function_name}: {e}")
             processed_logs[function_name] = "Error processing logs"
-    
+            error_counts[function_name] = {"Critical": 0, "Warning": 0, "Info": 0}
+
     state.processed_logs = processed_logs
+    state.error_counts = error_counts
     return state
+
+
 
 # Step 4: Store Logs in S3
 def store_logs_in_s3(state):
@@ -191,36 +301,73 @@ def store_logs_in_s3(state):
     return state
 
 # Step 5: SNS Notification
+# def send_sns_notification(state):
+#     sns_client = state.sns_client
+#     if sns_client is None:
+#         st.error("SNS client is not initialized!")
+#         return state
+
+#     warning_logs = []
+#     critical_logs = []
+
+#     # Categorizing logs
+#     for function_name, processed_log in state.processed_logs.items():
+#         if "WARNING" in processed_log:
+#             warning_logs.append((function_name, processed_log))
+#         if "CRITICAL" in processed_log:
+#             critical_logs.append((function_name, processed_log))
+
+#     # Table
+#     message = "### CloudWatch Error Summary \n\n"
+#     message += "| Severity  | Lambda Function  | Log Details  |\n"
+#     message += "|-----------|-----------------|--------------|\n"
+
+#     for function_name, log_details in warning_logs:
+#         message += f"| WARNING   | {function_name} | {log_details} |\n"
+
+#     for function_name, log_details in critical_logs:
+#         message += f"| CRITICAL  | {function_name} | {log_details} |\n"
+
+#     message += "\n### 🔍 Full logs stored in S3:\n"
+    
+#     # Add S3 Links for reference
+#     for function_name, link in state.s3_links.items():
+#         message += f"- [{function_name}]({link})\n"
+
+#     # Send Email via SNS
+#     try:
+#         response = sns_client.publish(
+#             TopicArn="arn:aws:sns:us-east-1:050451365316:testsnstopic",
+#             Message=message,
+#             Subject="AWS Lambda Warning & Critical Logs",
+#             MessageStructure="string"
+#         )
+#         st.success(f"SNS Message Sent! Message ID: {response['MessageId']}")
+#     except Exception as e:
+#         st.error(f"Error sending SNS notification: {e}")
+
+#     return state
+
 def send_sns_notification(state):
     sns_client = state.sns_client
     if sns_client is None:
         st.error("SNS client is not initialized!")
         return state
 
-    warning_logs = []
-    critical_logs = []
+    if not state.error_counts or not state.processed_logs:
+        st.error("Processed logs or error counts missing in state!")
+        return state
 
-    # Categorizing logs
-    for function_name, processed_log in state.processed_logs.items():
-        if "WARNING" in processed_log:
-            warning_logs.append((function_name, processed_log))
-        if "CRITICAL" in processed_log:
-            critical_logs.append((function_name, processed_log))
+    message = "### AWS Lambda CloudWatch Error Report\n\n"
+    message += "| Lambda Function | Critical | Warning | Info | Summary |\n"
+    message += "|-----------------|----------|---------|------|---------|\n"
 
-    # Table
-    message = "### CloudWatch Error Summary \n\n"
-    message += "| Severity  | Lambda Function  | Log Details  |\n"
-    message += "|-----------|-----------------|--------------|\n"
+    for function_name in state.lambda_functions:
+        counts = state.error_counts.get(function_name, {"Critical": 0, "Warning": 0, "Info": 0})
+        summary = state.processed_logs.get(function_name, "No summary available").replace('\n', ' ')
+        message += f"| {function_name} | {counts['Critical']} | {counts['Warning']} | {counts['Info']} | {summary} |\n"
 
-    for function_name, log_details in warning_logs:
-        message += f"| WARNING   | {function_name} | {log_details} |\n"
-
-    for function_name, log_details in critical_logs:
-        message += f"| CRITICAL  | {function_name} | {log_details} |\n"
-
-    message += "\n### 🔍 Full logs stored in S3:\n"
-    
-    # Add S3 Links for reference
+    message += "\n### Full Logs in S3:\n"
     for function_name, link in state.s3_links.items():
         message += f"- [{function_name}]({link})\n"
 
@@ -229,7 +376,7 @@ def send_sns_notification(state):
         response = sns_client.publish(
             TopicArn="arn:aws:sns:us-east-1:050451365316:testsnstopic",
             Message=message,
-            Subject="AWS Lambda Warning & Critical Logs",
+            Subject="AWS Lambda Error Summary Report",
             MessageStructure="string"
         )
         st.success(f"SNS Message Sent! Message ID: {response['MessageId']}")
@@ -238,8 +385,10 @@ def send_sns_notification(state):
 
     return state
 
+
+
 # Streamlit UI Logic
-lambda_prefix = st.text_input("Enter Lambda function prefix", "test1")
+lambda_prefix = st.text_input("Enter Lambda function prefix", "test")
 
 
 if aws_access_key_id and aws_secret_access_key and aws_region:
